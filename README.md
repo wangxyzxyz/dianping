@@ -68,3 +68,7 @@
 **5、发布评论页面**
 
 <img src="imgs/blog.png" title="" alt="" data-align="center">
+
+**6、压测效果图**
+
+<img title="" src="imgs/QPS_report.png" alt="">
