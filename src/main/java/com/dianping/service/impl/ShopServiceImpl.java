@@ -3,6 +3,7 @@ package com.dianping.service.impl;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.alibaba.ttl.TransmittableThreadLocal;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.dianping.dto.Result;
 import com.dianping.entity.Shop;
@@ -116,15 +117,26 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.ok(shop);
         }
         // 过期，异步缓存重建
+
         // 获取互斥锁
         String lockKey = LOCK_SHOP_KEY + id;
         RLock myLock = redissonClient.getLock(lockKey);
+
+        // 创建一个线程可父子传递的ThreadLocal，放父线程id
+        final TransmittableThreadLocal<Long> transmittableThreadLocal = new TransmittableThreadLocal<>();
+        long threadId = Thread.currentThread().getId();
+        transmittableThreadLocal.set(threadId);
+
         boolean isLock = myLock.tryLock();
         // 获取锁失败，直接返回店铺信息。
+//        if (!isLock) {
+//            log.debug("获取锁失败");
+//        }
+
         // 获取锁成功
         if (isLock) {
             try {
-                // 双重校验，判断缓存是否重建
+                // double check
                 // 1. 从redis查询商铺缓存
                 shopJson = stringRedisTemplate.opsForValue().get(key);
                 // 2. 判断缓存是否存在
@@ -144,19 +156,28 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
                 }
 
                 // 成功之后，开启独立线程，进行缓存重建
-                // ！！注意，不要在子线程中释放锁，因为redisson中锁基于线程，在子线程中无法释放主线程的锁。
-                Future<?> future = CACHE_REBUILD_EXECUTOR.submit(() -> {
+                // 在子线程中释放父线程加的锁
+                CACHE_REBUILD_EXECUTOR.submit(() -> {
                     log.debug("重建缓存开始");
-                    this.saveShop2Redis(id, 20L);
+                    try {
+//                        Thread.sleep(60000);
+                        this.saveShop2Redis(id, 20L);
+
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    } finally {
+                        // 使用 threadId 也可以，因为在一块，可以上下文传值
+                        myLock.unlockAsync(transmittableThreadLocal.get());
+                    }
                     log.debug("缓存重建完成");
                 });
 
-                // 等待子线程执行完毕
-                future.get();
             } catch (Exception e) {
                 throw new RuntimeException(e);
-            } finally {
-                myLock.unlock();
+            }finally {
+                // 移除threadLocal对象，谨防内存泄漏！！！
+                transmittableThreadLocal.remove();
+                log.debug("remove方法完成");
             }
         }
         // 7. 返回商铺数据
